@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>bonzi runner</title>
+  <style>
+    /* reset */
+    *{box-sizing:border-box;margin:0;padding:0}
+    html,body{height:100%}
+    body{
+      font-family:system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      background: linear-gradient(#eef2f3, #cfd8dc);
+      display:flex;align-items:center;justify-content:center;
+      color:#111;
+      -webkit-user-select:none;user-select:none;
+    }
+
+    .wrap{
+      width:min(900px,96vw);
+      aspect-ratio:16/9;
+      background:linear-gradient(#fff,#f6f6f6);
+      border-radius:12px;box-shadow:0 12px 30px rgba(10,10,10,.12);
+      padding:18px;display:flex;flex-direction:column;gap:12px;
+    }
+
+    canvas{width:100%;height:100%;border-radius:8px;background:#fff;display:block}
+
+    .hud{display:flex;justify-content:space-between;align-items:center;font-weight:600}
+    .hint{font-size:13px;opacity:.8}
+    .score{font-size:18px;letter-spacing:1px}
+
+    .overlay{
+      position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none
+    }
+
+    .btn{background:#111;color:#fff;padding:8px 12px;border-radius:8px;cursor:pointer;border:none}
+    .footer{display:flex;justify-content:space-between;align-items:center}
+
+    @media (max-width:600px){.wrap{padding:10px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hud">
+      <div class="hint">bonzi buddy esta em perigo!</div>
+      <div class="score" id="score">0</div>
+    </div>
+    <div style="position:relative;flex:1;">
+      <canvas id="game"></canvas>
+      <div class="overlay" id="overlay"></div>
+    </div>
+    <div class="footer">
+      <div style="font-size:13px;opacity:.7">bonzi - seu assistente virtual preferido hehe  - feito por Viana</div>
+      <div>
+        <button class="btn" id="restart">reiniciar</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /*
+      instruções rápidas:
+      - coloque suas imagens na pasta assets/ ao lado deste arquivo, ou use URLs externas
+      - substitua as strings marcadas com: _____ coloque aqui o caminho/URL _____
+      - exemplo: assets.player.src = 'assets/player.png' ou = 'https://meusite.com/player.png'
+    */
+
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const overlay = document.getElementById('overlay');
+    const restartBtn = document.getElementById('restart');
+
+    function resize(){
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.round(rect.width * devicePixelRatio);
+      canvas.height = Math.round(rect.height * devicePixelRatio);
+      ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+    }
+    window.addEventListener('resize',resize);
+
+    // audio simples
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function beep(freq, duration=0.06){
+      try{
+        const o = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        o.type = 'sine';
+        o.frequency.value = freq;
+        g.gain.value = 0.05;
+        o.connect(g);g.connect(audioCtx.destination);
+        o.start();
+        g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+        setTimeout(()=>{o.stop()}, duration*1000 + 20);
+      }catch(e){}
+    }
+
+    // --- assets (troca fácil) ---
+    const assets = {
+      player: new Image(),
+      cloud: new Image(),
+      obstacles: []
+    };
+
+    // TODO: substitua as paths abaixo pelo seu caminho/URL. procura exatamente as strings entre os ' ' para trocar.
+    assets.player.src = 'assets/tumblr_n8blyhBBZy1rui2o1o1_250.gif';
+    // se for sprite sheet, ajuste playerFrames no bloco de configuração mais abaixo
+
+    assets.cloud.src = 'assets/pngtree-soft-whites-clouds-on-transparent-background-png-image_15341810.png';
+
+    // lista de obstáculos: troque ou adicione quantas strings quiser
+    const obstacleFiles = [
+      'assets/Peedy_Parrot.webp',
+      'assets/Image_29.webp'
+    ];
+
+    for (let f of obstacleFiles) {
+      const img = new Image();
+      img.src = f;
+      assets.obstacles.push(img);
+    }
+
+    // se quiser editar: número de frames do sprite sheet do player (1 = sem sprite sheet)
+    const playerFrames = 1; // altere se usar um sprite sheet horizontal
+    let playerFrameIndex = 0;
+    let playerFrameTimer = 0;
+
+    // estado do jogo
+    let width, height, groundY;
+    let running = true;
+    let score = 0;
+    let speed = 6;
+
+    const player = {
+      x:40, w:40, h:40, y:0, vy:0, jumpPower: -13, grounded:false,
+      // hitbox opcional (ox,oy,w,h) - ajusta se usar sprite maior
+      hitbox: {ox:6, oy:6, w:28, h:28}
+    };
+
+    let obstacles = [];
+    let spawnTimer = 0;
+
+    function reset(){
+      speed = 6;
+      score = 0;
+      obstacles = [];
+      spawnTimer = 0;
+      player.y = 0;
+      player.vy = 0;
+      running = true;
+      overlay.innerHTML = '';
+      resize();
+      lastTime = performance.now();
+    }
+
+    function initSizes(){
+      width = canvas.clientWidth;
+      height = canvas.clientHeight;
+      groundY = height - 48;
+      player.y = groundY - player.h;
+    }
+
+    function spawnObstacle(){
+      const img = assets.obstacles.length ? assets.obstacles[Math.floor(Math.random()*assets.obstacles.length)] : null;
+      const h = 24 + Math.random()*36;
+      const w = 18 + Math.random()*36;
+      const ob = {x: width + 20, w, h, y: groundY - h, img};
+      // hitbox reduzida pra evitar colisões injustas
+      ob.hitbox = {ox:4, oy:4, w: ob.w-8, h: ob.h-8};
+      obstacles.push(ob);
+    }
+
+    function collides(a,b){
+      const A = {x: a.x + (a.hitbox?.ox||0), y: a.y + (a.hitbox?.oy||0), w: a.hitbox?.w||a.w, h: a.hitbox?.h||a.h};
+      const B = {x: b.x + (b.hitbox?.ox||0), y: b.y + (b.hitbox?.oy||0), w: b.hitbox?.w||b.w, h: b.hitbox?.h||b.h};
+      return !(A.x + A.w < B.x || A.x > B.x + B.w || A.y + A.h < B.y || A.y > B.y + B.h);
+    }
+
+    let lastTime = performance.now();
+    function loop(now){
+      const dt = Math.min(40, now - lastTime) / 16.6667;
+      lastTime = now;
+      update(dt);
+      render();
+      if(running) requestAnimationFrame(loop);
+    }
+
+    function update(dt){
+      speed += 0.0008 * dt * score/100;
+
+      // animação do sprite do player (se tiver frames)
+      playerFrameTimer += dt;
+      if(playerFrames > 1 && playerFrameTimer > 6){
+        playerFrameTimer = 0;
+        playerFrameIndex = (playerFrameIndex + 1) % playerFrames;
+      }
+
+      player.vy += 0.8 * dt; // gravity
+      player.y += player.vy * dt;
+      if(player.y >= groundY - player.h){
+        player.y = groundY - player.h;
+        player.vy = 0;
+        player.grounded = true;
+      } else player.grounded = false;
+
+      spawnTimer -= dt;
+      if(spawnTimer <= 0){
+        spawnObstacle();
+        spawnTimer = 40 + Math.random()*60 - Math.min(30, speed*2);
+      }
+
+      for(let i = obstacles.length-1; i>=0; i--){
+        obstacles[i].x -= speed * dt;
+        if(obstacles[i].x + obstacles[i].w < -40) obstacles.splice(i,1);
+      }
+
+      const pBox = {x:player.x, y:player.y, w:player.w, h:player.h, hitbox: player.hitbox};
+      for(const ob of obstacles){
+        if(collides(pBox, ob)){
+          running = false;
+          beep(120,0.12);
+          showGameOver();
+        }
+      }
+
+      score += 0.12 * dt * Math.max(1, speed/6);
+      scoreEl.textContent = Math.floor(score);
+    }
+
+    function render(){
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+
+      // chão
+      ctx.fillStyle = '#eeeeee';
+      ctx.fillRect(0, groundY, width, height-groundY);
+      ctx.strokeStyle = '#d0d0d0';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(0,groundY+0.5);ctx.lineTo(width,groundY+0.5);ctx.stroke();
+
+      // desenhar player (com sprite ou fallback)
+      if(assets.player.complete && assets.player.naturalWidth && playerFrames === 1){
+        // imagem inteira
+        ctx.drawImage(assets.player, player.x, Math.round(player.y), player.w, player.h);
+      } else if(assets.player.complete && assets.player.naturalWidth && playerFrames > 1){
+        const fw = assets.player.width / playerFrames;
+        const fh = assets.player.height;
+        ctx.drawImage(assets.player, fw * playerFrameIndex, 0, fw, fh, player.x, Math.round(player.y), player.w, player.h);
+      } else {
+        ctx.fillStyle = '#222';
+        ctx.fillRect(player.x, Math.round(player.y), player.w, player.h);
+      }
+
+      // obstáculos (imagem ou retângulo)
+      for(const ob of obstacles){
+        if (ob.img && ob.img.complete && ob.img.naturalWidth){
+          ctx.drawImage(ob.img, Math.round(ob.x), Math.round(ob.y), ob.w, ob.h);
+        } else {
+          ctx.fillStyle = '#2b2b2b';
+          ctx.fillRect(Math.round(ob.x), Math.round(ob.y), ob.w, ob.h);
+        }
+      }
+
+      // nuvem decorativa
+      if (assets.cloud.complete && assets.cloud.naturalWidth) {
+        const cloudX = (performance.now()/10) % (width+200) - 100;
+        ctx.drawImage(assets.cloud, cloudX*0.4, 40, 72, 36);
+      } else {
+        ctx.fillStyle = 'rgba(50,50,50,0.06)';
+        const cloudX = (performance.now()/10) % (width+200) - 100;
+        ctx.beginPath();ctx.ellipse(cloudX*0.4, 40, 36,18,0,0,Math.PI*2);ctx.fill();
+      }
+    }
+
+    function showGameOver(){
+      overlay.innerHTML = '<div style="pointer-events:auto;display:flex;flex-direction:column;align-items:center;gap:8px"><div style="background:rgba(0,0,0,0.7);color:#fff;padding:12px 18px;border-radius:8px;font-weight:700">game over</div><div style="font-size:13px;opacity:.9;color:#222">SE FUDEU! clique aqui pra reiniciar</div></div>';
+    }
+
+    function jump(){
+      if(!running) return;
+      if(player.grounded){
+        player.vy = player.jumpPower;
+        player.grounded = false;
+        beep(840,0.05);
+      }
+    }
+
+    window.addEventListener('keydown', e=>{
+      if(e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW'){
+        e.preventDefault();
+        if(running) jump(); else restart();
+      }
+    });
+
+    window.addEventListener('touchstart', e=>{
+      e.preventDefault();
+      if(running) jump(); else restart();
+    }, {passive:false});
+
+    canvas.addEventListener('mousedown', e=>{
+      if(running) jump(); else restart();
+    });
+
+    restartBtn.addEventListener('click', ()=>{ restart(); });
+
+    function restart(){
+      if(audioCtx.state === 'suspended') audioCtx.resume();
+      reset();
+      loop(performance.now());
+    }
+
+    // inicializa
+    resize();
+    initSizes();
+    reset();
+    requestAnimationFrame(loop);
+    setTimeout(()=>{resize();initSizes();},200);
+  </script>
+</body>
+</html>
